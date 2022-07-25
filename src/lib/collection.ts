@@ -1,46 +1,52 @@
-const mongodb = require('mongodb');
+import { ObjectId } from 'mongodb';
+import type {
+  Collection as MongoCollection,
+  Document,
+  WithId,
+  InsertOneOptions,
+  BulkWriteOptions,
+  DeleteOptions,
+  UpdateResult,
+  AggregateOptions,
+  IndexSpecification,
+  CreateIndexesOptions,
+} from 'mongodb';
 
-const Cursor = require('./cursor');
-const Bulk = require('./bulk');
-
-const oid = mongodb.ObjectID.createPk;
+import Cursor from './cursor';
+import Bulk from './bulk';
+import type Database from './database';
 
 // TODO: Make this configurable by users
 const writeOpts = { writeConcern: { w: 1 }, ordered: true }
 
-module.exports = class Collection {
-  constructor(db, name) {
+export default class Collection {
+  private db: Database;
+  private name: string;
+
+  constructor(db: Database, name: string) {
     this.db = db;
     this.name = name;
   }
 
-  connect() {
-    return this.db.connect().then(connection => connection.collection(this.name));
+  connect(): Promise<MongoCollection | undefined> {
+    return this.db.connect().then(connection => connection?.collection(this.name));
   }
 
-  find(query, projection, opts) {
+  find(query, projection, opts): Promise<[] | WithId<Document>[] | undefined> {
     return this
       .connect()
       .then(collection => {
-        if (this.db.features.useLegacyProjections) {
-          return collection.find(query, projection, opts).toArray();
-        }
-
         const options = Object.assign({ projection }, opts);
-        return collection.find(query, options).toArray();
+        return collection?.find(query, options).toArray();
       });
   }
 
-  findAsCursor(query, projection, opts) {
+  findAsCursor(query, projection, opts): Cursor {
     return new Cursor(() => this
       .connect()
       .then(collection => {
-        if (this.db.features.useLegacyProjections) {
-          return collection.find(query, projection, opts);
-        }
-
         const options = Object.assign({ projection }, opts);
-        return collection.find(query, options);
+        return collection?.find(query, options);
       }));
   }
 
@@ -52,19 +58,19 @@ module.exports = class Collection {
 
   findAndModify(opts) {
     return this.runCommand('findAndModify', opts)
-      .then(result => result.value);
+      .then(result => result?.value);
   }
 
   count(query) {
     return this
       .connect()
-      .then(collection => collection.countDocuments(query));
+      .then(collection => collection?.countDocuments(query));
   }
 
   distinct(field, query) {
     return this
       .runCommand('distinct', { key: field, query: query })
-      .then(result => result.values);
+      .then(result => result?.values);
   }
 
   insert(docOrDocs, opts) {
@@ -73,46 +79,48 @@ module.exports = class Collection {
       : this.insertOne(docOrDocs, opts);
   }
 
-  insertOne(doc, opts) {
-    if (!doc._id) doc._id = oid();
+  insertOne<T extends { _id?: ObjectId }>(doc: T, opts: InsertOneOptions): Promise<T> {
+    if (!doc._id) doc._id = new ObjectId();
 
     return this
       .connect()
-      .then(collection => collection.insertOne(doc, Object.assign({}, writeOpts, opts)))
+      .then(collection => collection?.insertOne(doc, Object.assign({}, writeOpts, opts)))
       .then(() => doc);
   }
 
-  insertMany(docs, opts) {
+  insertMany<T extends { _id?: ObjectId }>(docs: T[], opts: BulkWriteOptions): Promise<T[]> {
     for (let i = 0; i < docs.length; i++) {
-      if (!docs[i]._id) docs[i]._id = oid();
+      if (!docs[i]._id) docs[i]._id = new ObjectId();
     }
 
     return this
       .connect()
-      .then(collection => collection.insertMany(docs, Object.assign({}, writeOpts, opts)))
+      .then(collection => collection?.insertMany(docs, Object.assign({}, writeOpts, opts)))
       .then(() => docs);
   }
 
-  update(query, update, opts) {
+  update(query, update, opts): Promise<UpdateResult & { ok: boolean, n: number }> {
     opts = opts || {};
     const isMulti = opts.multi
 
     return this
       .connect()
       .then(collection => {
-        const updateFn = isMulti
-          ? collection.updateMany.bind(collection)
-          : collection.updateOne.bind(collection)
-        return updateFn(query, update, Object.assign({}, writeOpts, opts))
+        if (isMulti) {
+          return collection?.updateMany(query, update, { ...writeOpts, ...opts });
+        } else {
+          return collection?.updateOne(query, update, { ...writeOpts, ...opts });
+        }
       })
-      .then((result) => {
+      .then((result: UpdateResult | undefined) => {
         // Parse the result to be compliant with the old standard:
         // https://github.com/mongodb/specifications/blob/master/source/crud/crud.rst#write-results
         // Avoid using "ok" and "n".
-        return Object.assign({}, result, {
-          ok: result.acknowledged,
-          n: result.modifiedCount || result.upsertedCount,
-        })
+        return {
+          ...result,
+          ok: result?.acknowledged,
+          n: result?.modifiedCount || result?.upsertedCount,
+        }
       });
   }
 
@@ -121,7 +129,7 @@ module.exports = class Collection {
 
     return this
       .connect()
-      .then(collection => collection.replaceOne(filter, replacement, Object.assign({}, writeOpts, opts)));
+      .then(collection => collection?.replaceOne(filter, replacement, { ...writeOpts, ...opts }));
   }
 
   save(doc, opts) {
@@ -129,32 +137,31 @@ module.exports = class Collection {
 
     if (doc._id) {
       return this
-        .update({ _id: doc._id }, { $set: doc }, Object.assign({ upsert: true }, opts))
+        .update({ _id: doc._id }, { $set: doc }, { upsert: true, ...opts})
         .then(() => doc);
     } else {
       return this.insert(doc, opts);
     }
   }
 
-  remove(query, opts) {
+  remove(query, opts: DeleteOptions & { justOne?: boolean }) {
     opts = opts || { justOne: false };
 
     if (typeof opts == 'boolean') {
       opts = { justOne: opts };
     }
 
-    const deleteOperation = opts.justOne ? 'deleteOne' : 'deleteMany';
-
     return this.connect()
-      .then(collection => collection[deleteOperation](query, Object.assign({}, writeOpts, opts)))
+      .then(collection => collection?.[opts.justOne ? 'deleteOne' : 'deleteMany']?.(query, Object.assign({}, writeOpts, opts)))
       .then(result => {
         // Parse the result to be compliant with the old standard:
         // https://github.com/mongodb/specifications/blob/master/source/crud/crud.rst#write-results
         // Avoid using "ok" and "n".
-        return Object.assign({}, result, {
-          ok: result.acknowledged,
-          n: result.deletedCount
-        })
+        return {
+          ...result,
+          ok: result?.acknowledged,
+          n: result?.deletedCount
+        }
       });
   }
 
@@ -181,66 +188,61 @@ module.exports = class Collection {
       .then(collection => collection.mapReduce(map, reduce, opts));
   }
 
-  runCommand(cmd, opts) {
+  runCommand(cmd, opts?: object) {
     opts = opts || {}
-
-    const cmdObject = Object.assign({
-      [cmd]: this.name,
-    }, opts);
 
     return this.db
       .connect()
-      .then(collection => collection.command(cmdObject));
+      .then(collection => collection?.command({
+        [cmd]: this.name,
+        ...opts,
+      }));
   }
 
   toString() {
     return this.name;
   }
 
-  dropIndexes() {
+  dropIndexes(): Promise<Document | undefined>  {
     return this.runCommand('dropIndexes', { index: '*' });
   }
 
-  dropIndex(index) {
+  dropIndex(index): Promise<Document | undefined> {
     return this.runCommand('dropIndexes', { index });
   }
 
-  createIndex(index, opts) {
-    opts = opts || {};
-
+  createIndex(index: IndexSpecification, opts: CreateIndexesOptions = {}): Promise<void | string>  {
     return this.connect()
-      .then(collection => collection.createIndex(index, opts));
+      .then(collection => collection?.createIndex(index, opts));
   }
 
-  ensureIndex(index, opts) {
+  ensureIndex(index: IndexSpecification, opts: CreateIndexesOptions = {}): Promise<void | string>  {
     return this.createIndex(index, opts)
   }
 
-  getIndexes() {
+  getIndexes(): Promise<Document[] | undefined>  {
     return this.connect()
-      .then(collection => collection.indexes());
+      .then(collection => collection?.indexes());
   }
 
-  reIndex() {
+  reIndex(): Promise<Document | undefined>  {
     return this.runCommand('reIndex');
   }
 
-  isCapped() {
+  isCapped(): Promise<boolean>  {
     return this.connect()
-      .then(collection => collection.isCapped())
+      .then(collection => collection?.isCapped())
       .then(isCapped => !!isCapped);
   }
 
-  aggregate(pipeline, opts) {
+  aggregate(pipeline: Document[], opts: AggregateOptions = {}): Promise<any[]> {
     return this.aggregateAsCursor(pipeline, opts).toArray();
   }
 
-  aggregateAsCursor(pipeline, opts) {
-    opts = opts || {};
-
+  aggregateAsCursor(pipeline: Document[], opts: AggregateOptions = {}): Cursor {
     return new Cursor(() => this
       .connect()
-      .then(collection => collection.aggregate(pipeline, opts))
+      .then(collection => collection?.aggregate(pipeline, opts))
     );
   }
 

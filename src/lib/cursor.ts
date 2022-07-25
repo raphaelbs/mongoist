@@ -1,6 +1,12 @@
-const { Readable } = require('stream');
+import { Readable } from 'stream';
+import type { FindCursor } from 'mongodb';
 
-class Cursor extends Readable {
+export default class Cursor extends Readable {
+  cursorFactory: () => Promise<Cursor & FindCursor>;
+  _options: object;
+  _flags: object;
+  cursor: Cursor & FindCursor;
+
   constructor(cursorFactory) {
     super({objectMode: true, highWaterMark: 0});
 
@@ -21,7 +27,7 @@ class Cursor extends Readable {
     });
   }
 
-  map(fn) {
+  map(fn: (doc) => never) {
     const result = []
 
     return new Promise((resolve) => {
@@ -41,12 +47,12 @@ class Cursor extends Readable {
     });
   }
 
-  forEach(fn) {
+  forEach(fn: (doc) => void): Promise<any> {
     return new Promise((resolve) => {
       const loop = () => {
         this.next()
           .then(doc => {
-            if (!doc) { return resolve(); }
+            if (!doc) { return resolve(undefined); }
 
             fn(doc);
 
@@ -80,7 +86,7 @@ class Cursor extends Readable {
     return this.getCursor().then(cursor => cursor.close());
   }
 
-  next() {
+  next(): Promise<any> {
     return this.getCursor().then(cursor => {
       if (cursor.closed || cursor.killed) {
         return null;
@@ -90,7 +96,7 @@ class Cursor extends Readable {
     });
   }
 
-  hasNext() {
+  hasNext(): Promise<boolean> {
     return this.getCursor().then(cursor => !cursor.closed && cursor.hasNext());
   }
 
@@ -114,7 +120,7 @@ class Cursor extends Readable {
   }
 
 
-  getCursor() {
+  getCursor(): Promise<FindCursor> {
     if (this.cursor) {
       return Promise.resolve(this.cursor);
     }
@@ -137,13 +143,3 @@ class Cursor extends Readable {
       });
   }
 }
-
-// Feature-detect async iterator protocol support, only available in Node 10+.
-if (typeof Symbol.asyncIterator === 'symbol') {
-  Cursor.prototype[Symbol.asyncIterator] = function() {
-    const next = () => this.next().then((doc) => ({ value: doc || undefined, done: !doc }));
-    return { next };
-  };
-}
-
-module.exports = Cursor;

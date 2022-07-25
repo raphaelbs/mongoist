@@ -1,39 +1,73 @@
-const mongodb = require('mongodb');
-const maxBulkSize = 1000;
+import { ObjectId } from 'mongodb';
+import type { Db, WriteConcern } from 'mongodb';
 
-const oid = mongodb.ObjectID.createPk;
+const MAX_BULK_SIZE = 1000;
 
-class Bulk {
-  constructor(colName, ordered, connect, opts) {
-    this.colName = colName;
+class Command {
+  ordered: boolean;
+  writeConcern: WriteConcern;
+  private cmdNames: object = {};
+  private bulkCollections: object = {};
+
+  constructor(ordered: boolean, writeConcern: WriteConcern) {
     this.ordered = ordered;
-    this.connect = connect;
-    
-    opts = opts || { writeConcern: { w: 1 } };
-    this.writeConcern = opts.writeConcern || { w: 1 };
-
-    this.cmds = [];
-
-    this.cmdKeys = {
-      insert: 'nInserted',
-      delete: 'nRemoved',
-      update: 'nUpserted'
-    }
+    this.writeConcern = writeConcern;
   }
 
-  ensureCommand(cmdName, bulkCollection) {
-    if (this.currentCmd && (!this.currentCmd[cmdName] || this.currentCmd[bulkCollection].length === maxBulkSize)) {
+  setCmdName(cmdName: string, colName: string) {
+    this.cmdNames[cmdName] = colName;
+  }
+
+  setBulkCollection(bulkCollection: string) {
+    this.bulkCollections[bulkCollection] = [];
+  }
+
+  getCmdName(cmdName: string) {
+    return this.cmdNames[cmdName];
+  }
+
+  getBulkCollection(bulkCollection: string) {
+    return this.bulkCollections[bulkCollection];
+  }
+}
+
+export default class Bulk {
+  private readonly colName: string;
+  private readonly ordered: boolean;
+  private readonly connect: () => Promise<Db | null>;
+  private readonly cmds: any[];
+  private readonly writeConcern: WriteConcern;
+  private readonly cmdKeys = {
+    insert: 'nInserted',
+    delete: 'nRemoved',
+    update: 'nUpserted'
+  }
+  private currentCmd: Command | null;
+
+  constructor(
+    colName: string,
+    ordered: boolean,
+    connect: () => Promise<Db | null>,
+    opts: object & { writeConcern: WriteConcern } = { writeConcern: { w: 1 } }) {
+      this.colName = colName;
+      this.ordered = ordered;
+      this.connect = connect;
+      
+      this.writeConcern = opts.writeConcern || { w: 1 };
+
+      this.cmds = [];
+    }
+
+  ensureCommand(cmdName: string, bulkCollection: string) {
+    if (this.currentCmd && (!this.currentCmd.getCmdName(cmdName) || this.currentCmd.getBulkCollection(bulkCollection).length === MAX_BULK_SIZE)) {
       this.cmds.push(this.currentCmd);
       this.currentCmd = null;
     }
 
     if (!this.currentCmd) {
-      this.currentCmd = {
-        [cmdName]: this.colName,
-        [bulkCollection]: [],
-        ordered: this.ordered,
-        writeConcern: this.writeConcern
-      }
+      this.currentCmd = new Command(this.ordered, this.writeConcern);
+      this.currentCmd.setCmdName(cmdName, this.colName);
+      this.currentCmd.setBulkCollection(bulkCollection);
     }
 
     return this.currentCmd;
@@ -44,12 +78,12 @@ class Bulk {
 
     const remove = (limit) => {
       const cmd = this.ensureCommand('delete', 'deletes');
-      cmd.deletes.push({ q, limit });
+      cmd.getBulkCollection('deletes').push({ q, limit });
     }
 
     const update = (u, multi) => {
       const cmd = this.ensureCommand('update', 'updates');
-      cmd.updates.push({ q, u, multi, upsert })
+      cmd.getBulkCollection('updates').push({ q, u, multi, upsert })
     }
 
     return new FindSyntax({ 
@@ -62,8 +96,8 @@ class Bulk {
   insert(doc) {
     const cmd = this.ensureCommand('insert', 'documents');
 
-    doc._id = doc._id || oid();
-    cmd.documents.push(doc);
+    doc._id = doc._id || new ObjectId();
+    cmd.getBulkCollection('documents').push(doc);
   }
 
   execute() {
@@ -138,8 +172,16 @@ class Bulk {
   }
 }
 
+type FindSyntaxCmds = {
+  update: (updObj: object, multi: boolean) => void;
+  upsert: (upsertValue: boolean) => void;
+  remove: (limit: number) => void;
+}
+
 class FindSyntax {
-  constructor(cmds) {
+  private readonly cmds: FindSyntaxCmds;
+
+  constructor(cmds: FindSyntaxCmds) {
     this.cmds = cmds;
   }
 
@@ -180,5 +222,3 @@ function each(cmds, executeCmd, idx) {
 
   return Promise.resolve();
 }
-
-module.exports = Bulk;

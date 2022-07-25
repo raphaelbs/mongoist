@@ -1,7 +1,12 @@
-const { EventEmitter } = require('events');
-const mongodb = require('mongodb');
-const Collection = require('./collection');
-const debug = require('debug')('mongoist');
+import { EventEmitter } from 'events';
+import { MongoClient } from 'mongodb';
+import Debug from 'debug';
+
+import type { MongoClientOptions, Db } from 'mongodb';
+
+import Collection from './collection';
+
+const debug = Debug('mongoist');
 
 function normalizeCommandOpts(opts) {
   return typeof opts === 'string' ? { [opts]: 1 } : opts;
@@ -35,7 +40,12 @@ function isThenable(value) {
   return !!value && typeof value === 'object' && typeof value.then === 'function';
 }
 
-module.exports = class Database extends EventEmitter {
+export default class Database extends EventEmitter {
+  private connectionString: string | Database | Promise<String> | { _getConnection: () => Promise<Database> };
+  private options: MongoClientOptions & { dbName: string; };
+  private client: MongoClient | null;
+  private connection: Db | null;
+
   constructor(connectionString, options) {
     super();
 
@@ -65,8 +75,8 @@ module.exports = class Database extends EventEmitter {
 
   getCollectionInfos() {
     return this.connect()
-      .then(connection => connection.listCollections().toArray())
-      .then(collectionInfos => collectionInfos.filter(ci => !ci.name.startsWith('system.')))
+      .then(connection => connection?.listCollections().toArray())
+      .then(collectionInfos => collectionInfos?.filter(ci => !ci.name.startsWith('system.')))
   }
 
   listCollections() {
@@ -74,13 +84,13 @@ module.exports = class Database extends EventEmitter {
   }
 
   getCollectionNames() {
-    return this.listCollections().then(collections => collections.map((collection) => collection.name));
+    return this.listCollections().then(collections => collections?.map((collection) => collection.name));
   }
 
   adminCommand(opts) {
     return this
       .connect()
-      .then(connection => connection.admin().command(normalizeCommandOpts(opts)));
+      .then(connection => connection?.admin().command(normalizeCommandOpts(opts)));
   }
 
   runCommand(opts) {
@@ -91,7 +101,7 @@ module.exports = class Database extends EventEmitter {
 
     return this
       .connect()
-      .then(connection => connection.command(normalizeCommandOpts(opts)));
+      .then(connection => connection?.command(normalizeCommandOpts(opts)));
   }
 
   stats(scale) {
@@ -124,25 +134,21 @@ module.exports = class Database extends EventEmitter {
   getLastError() {
     return this
       .runCommand('getLastError')
-      .then(res => res.err);
+      .then(res => res?.err);
   }
 
-  connect() {
+  connect(): Promise<Db> {
     if (this.connection) {
       return Promise.resolve(this.connection);
     }
 
     if (typeof this.connectionString == 'string') {
-      return mongodb.MongoClient
+      return MongoClient
         .connect(this.connectionString, this.options)
         .then(client => {
 
           this.client = client;
           this.connection = client.db(this.options.dbName);
-
-          this.features = {
-            useLegacyProjections: false
-          };
 
           this.emit('connect');
 
@@ -160,11 +166,6 @@ module.exports = class Database extends EventEmitter {
 
           this.connection = connection;
 
-          this.features = {
-            // Third argument conn is only sent in mongojs 3
-            useLegacyProjections: !conn
-          };
-
           this.emit('connect');
 
           resolve(this.connection);
@@ -173,10 +174,6 @@ module.exports = class Database extends EventEmitter {
     } else if (this.connectionString instanceof Database) { // mongoist
       return this.connectionString.connect().then((connection) => {
         this.connection = connection;
-
-        this.features = {
-          useLegacyProjections: false
-        };
 
         this.emit('connect');
 
@@ -189,9 +186,11 @@ module.exports = class Database extends EventEmitter {
           return this.connect();
         });
     }
+
+    return Promise.reject(null);
   }
 
-  close(force) {
+  close(force: boolean) {
     return this
       .connect()
       .then(connection => {
